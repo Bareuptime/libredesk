@@ -1,0 +1,59 @@
+# Build stage
+FROM node:20-alpine AS frontend-builder
+
+# Install pnpm
+RUN npm install -g pnpm
+
+# Copy frontend source
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install
+
+COPY frontend/ ./
+ARG VITE_APP_VERSION=dev
+RUN VITE_APP_VERSION=${VITE_APP_VERSION} pnpm build
+
+# Go build stage
+FROM golang:1.24.3-alpine AS backend-builder
+
+WORKDIR /app
+
+# Copy Go modules files first for better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Install stuffbin
+RUN go install github.com/knadh/stuffbin/...
+
+# Copy source code
+COPY . .
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+
+# Build binary
+ARG VERSION=dev
+ARG LAST_COMMIT=unknown
+RUN CGO_ENABLED=0 go build -a \
+    -ldflags="-X 'main.buildString=${VERSION} (#${LAST_COMMIT})' -X 'main.versionString=${VERSION}' -X 'github.com/abhinavxd/libredesk/internal/version.Version=${VERSION}' -s -w" \
+    -o libredesk cmd/*.go
+
+# Stuff static assets into binary
+RUN stuffbin -a stuff -in libredesk -out libredesk frontend/dist i18n schema.sql static
+
+# Final stage
+FROM alpine:latest
+
+# Install necessary packages
+RUN apk --no-cache add ca-certificates tzdata
+
+# Set the working directory to /libredesk
+WORKDIR /libredesk
+
+# Copy the built binary
+COPY --from=backend-builder /app/libredesk .
+COPY config.sample.toml config.toml
+
+# Expose port 9000 for the application
+EXPOSE 9000
+
+# Set the default command to run the libredesk binary
+CMD ["./libredesk"]
